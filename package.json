@@ -1,0 +1,17 @@
+{
+  "name": "buslane-booking-system",
+  "version": "1.0.0",
+  "description": "BusLane Intercity Bus Booking Flow with Concurrency Guard, Real-Time Sync, and Distributed Test Harness (?dev=1)",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "test": "node server/test/run_all_tests.js"
+  },
+  "keywords": ["bus-booking", "concurrency", "distributed-systems", "test-harness", "edge-cases"],
+  "author": "BusLane Engineering Team",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

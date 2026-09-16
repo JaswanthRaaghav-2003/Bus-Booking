@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>BusLane | Pune to Nashik (22:30 IST)</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- Top App Navigation Bar -->
+  <header class="navbar">
+    <div class="nav-container">
+      <div class="brand">
+        <div class="brand-logo">🚌</div>
+        <div class="brand-text">
+          <span class="brand-name">BusLane</span>
+          <span class="route-badge">Pune → Nashik • 22:30 IST</span>
+        </div>
+      </div>
+      
+      <div class="nav-right">
+        <div id="sync-status" class="sync-pill online">
+          <span class="sync-dot"></span>
+          <span class="sync-label">Live Sync</span>
+        </div>
+        <button id="dev-toggle-btn" class="dev-mode-badge" title="Toggle Test Mode (?dev=1)">
+          🧪 <span class="dev-badge-text">Test Mode</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Active Hold Countdown Bar -->
+    <div id="hold-banner" class="hold-banner hidden">
+      <div class="hold-content">
+        <span class="hold-icon">⏱️</span>
+        <span class="hold-text">Seats held for: <strong id="hold-countdown">10:00</strong></span>
+        <div class="hold-progress-track">
+          <div id="hold-progress-bar" class="hold-progress-fill"></div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Application Container -->
+  <main class="app-main">
+    
+    <!-- Step Navigation Indicator -->
+    <nav class="stepper-nav" aria-label="Booking Progress">
+      <div class="step-item active" data-step="1">
+        <div class="step-circle">1</div>
+        <span class="step-title">Select Seats</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" data-step="2">
+        <div class="step-circle">2</div>
+        <span class="step-title">Passengers</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" data-step="3">
+        <div class="step-circle">3</div>
+        <span class="step-title">Fare Summary</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" data-step="4">
+        <div class="step-circle">4</div>
+        <span class="step-title">Payment</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" data-step="5">
+        <div class="step-circle">5</div>
+        <span class="step-title">Ticket</span>
+      </div>
+    </nav>
+
+    <!-- STEP 1: SEAT SELECTION MAP -->
+    <section id="step-seatmap" class="step-view active">
+      <div class="view-header">
+        <div>
+          <h2>Choose Your Seats</h2>
+          <p class="subtitle">Max 4 seats per booking. Seats 3A, 3B, 4A, 4B are reserved for women.</p>
+        </div>
+        <div class="bus-meta-tag">
+          <span>Route BL-PN-01</span>
+          <span>Single Deck (32 Seats)</span>
+        </div>
+      </div>
+
+      <!-- Seat Status Legend -->
+      <div class="seat-legend">
+        <div class="legend-item"><span class="legend-box available"></span> Available (₹<span id="legend-base-fare">450</span>)</div>
+        <div class="legend-item"><span class="legend-box selected"></span> Selected (You)</div>
+        <div class="legend-item"><span class="legend-box ladies"></span> Ladies Only</div>
+        <div class="legend-item"><span class="legend-box held"></span> Held by another</div>
+        <div class="legend-item"><span class="legend-box booked"></span> Booked</div>
+      </div>
+
+      <!-- Bus Visual Layout -->
+      <div class="bus-shell">
+        <div class="bus-cockpit">
+          <div class="steering-wheel" title="Driver Cabin">🎡 Driver</div>
+          <div class="door-entry" title="Passenger Entry Door">🚪 Entry</div>
+        </div>
+
+        <div class="bus-cabin">
+          <!-- Left Column: Window A + Aisle B -->
+          <div class="seat-column-pair left-pair">
+            <div class="column-header"><span>Win A</span><span>Aisle B</span></div>
+            <div id="seats-col-a-b" class="seat-grid"></div>
+          </div>
+
+          <!-- Central Walking Aisle -->
+          <div class="bus-aisle">
+            <span class="aisle-label">A I S L E</span>
+          </div>
+
+          <!-- Right Column: Aisle C + Window D -->
+          <div class="seat-column-pair right-pair">
+            <div class="column-header"><span>Aisle C</span><span>Win D</span></div>
+            <div id="seats-col-c-d" class="seat-grid"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Floating Action Bar -->
+      <div class="seat-action-bar">
+        <div class="selection-summary">
+          <div class="summary-label">Selected Seats:</div>
+          <div id="selected-seats-chips" class="chips-container">
+            <span class="no-selection-hint">Tap up to 4 seats</span>
+          </div>
+        </div>
+        <div class="action-buttons">
+          <div class="price-preview">
+            <span class="price-label">Estimated:</span>
+            <span id="seatmap-price-preview" class="price-amount">₹0</span>
+          </div>
+          <button id="btn-to-passengers" class="btn btn-primary" disabled>
+            Enter Passenger Details →
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 2: PASSENGER DETAILS -->
+    <section id="step-passengers" class="step-view">
+      <div class="view-header">
+        <div>
+          <h2>Passenger & Boarding Details</h2>
+          <p class="subtitle">Please provide exact travel details. Government ID required at boarding.</p>
+        </div>
+      </div>
+
+      <!-- Boarding Point Selector (Selected BEFORE Payment!) -->
+      <div class="card boarding-card">
+        <h3>📍 Select Boarding Point</h3>
+        <p class="helper-text">Choose your pickup stop along the Pune route (departure 22:30 IST):</p>
+        <div class="form-group">
+          <select id="boarding-select" class="form-control">
+            <option value="bp_1">Pune Swargate — 22:30 IST (Platform 3, Opp Bus Depot)</option>
+            <option value="bp_2">Shivaji Nagar — 22:50 IST (Under Flyover, Bus Lane)</option>
+            <option value="bp_3">Nashik Phata — 23:15 IST (Kasargawadi Signal)</option>
+            <option value="bp_4">Bhosari — 23:45 IST (Landewadi Chowk)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Dynamic Passenger Cards -->
+      <div id="passengers-form-container"></div>
+
+      <!-- Lap Infants Under 5 Section -->
+      <div class="card infant-card">
+        <div class="infant-header">
+          <div>
+            <h3>👶 Travelling with a child under 5?</h3>
+            <p class="helper-text">Children under 5 travel free as lap infants (no seat assigned, max 1 per adult).</p>
+          </div>
+          <button id="btn-add-infant" type="button" class="btn btn-secondary btn-sm">+ Add Lap Infant</button>
+        </div>
+        <div id="infants-container"></div>
+      </div>
+
+      <!-- Navigation Actions -->
+      <div class="step-nav-buttons">
+        <button id="btn-back-to-seats" class="btn btn-outline">← Back to Seat Map</button>
+        <button id="btn-to-fare" class="btn btn-primary">Review Fare Summary →</button>
+      </div>
+    </section>
+
+    <!-- STEP 3: FARE SUMMARY -->
+    <section id="step-fare" class="step-view">
+      <div class="view-header">
+        <div>
+          <h2>Fare & Tax Breakdown</h2>
+          <p class="subtitle">Official BusLane tax invoice computed strictly to the Rupee.</p>
+        </div>
+      </div>
+
+      <div class="card invoice-card">
+        <div class="invoice-header">
+          <span class="trip-title">Pune to Nashik (Departing 22:30 IST)</span>
+          <span class="lock-guarantee">🔒 Price Locked to Hold</span>
+        </div>
+
+        <table class="fare-table">
+          <tbody>
+            <tr>
+              <td>
+                <div class="item-title">Base Passenger Fare</div>
+                <div id="invoice-base-calc" class="item-sub">₹450 × 0 seats</div>
+              </td>
+              <td id="invoice-base-subtotal" class="text-right">₹0</td>
+            </tr>
+            <tr>
+              <td>
+                <div class="item-title">Platform Convenience Fee</div>
+                <div class="item-sub">Flat fee per booking transaction</div>
+              </td>
+              <td id="invoice-convenience-fee" class="text-right">₹30</td>
+            </tr>
+            <tr class="subtotal-row">
+              <td><strong>Taxable Amount (Subtotal)</strong></td>
+              <td id="invoice-taxable-amount" class="text-right font-bold">₹0</td>
+            </tr>
+            <tr>
+              <td>
+                <div class="item-title">GST (Goods & Services Tax) @ 5%</div>
+                <div class="item-sub">5% on Taxable Amount (rounded half-up to Rupee)</div>
+              </td>
+              <td id="invoice-gst-amount" class="text-right">₹0</td>
+            </tr>
+            <tr class="grand-total-row">
+              <td><strong>Grand Total Payable</strong></td>
+              <td id="invoice-grand-total" class="text-right font-bold text-accent">₹0</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="invoice-notes">
+          <p>✓ Children under 5 travel free on an adult's lap with no seat surcharge.</p>
+          <p>✓ Price is strictly locked for the remaining duration of your hold lease.</p>
+        </div>
+      </div>
+
+      <div class="step-nav-buttons">
+        <button id="btn-back-to-passengers" class="btn btn-outline">← Back to Passengers</button>
+        <button id="btn-to-payment" class="btn btn-primary">Proceed to Payment →</button>
+      </div>
+    </section>
+
+    <!-- STEP 4: PAYMENT SIMULATION -->
+    <section id="step-payment" class="step-view">
+      <div class="view-header">
+        <div>
+          <h2>Payment Gateway Simulation</h2>
+          <p class="subtitle">Integrated simulated payment provider (Zero real funds required).</p>
+        </div>
+      </div>
+
+      <div class="card payment-card">
+        <div class="payment-order-meta">
+          <div>
+            <span class="order-label">Total Amount to Pay:</span>
+            <span id="pay-display-amount" class="order-total">₹0</span>
+          </div>
+          <div class="payment-timer">
+            <span>Gateway Timeout:</span>
+            <strong id="gateway-countdown">05:00</strong>
+          </div>
+        </div>
+
+        <div class="payment-options">
+          <h4>Select Payment Method</h4>
+          <label class="payment-method-option active">
+            <input type="radio" name="pay-method" value="UPI" checked>
+            <span class="method-icon">⚡</span>
+            <span class="method-details">
+              <strong>Instant UPI (Google Pay, PhonePe, Paytm)</strong>
+              <small>Immediate settlement simulation</small>
+            </span>
+          </label>
+          <label class="payment-method-option">
+            <input type="radio" name="pay-method" value="CARD">
+            <span class="method-icon">💳</span>
+            <span class="method-details">
+              <strong>Debit / Credit Card (RuPay, Visa, Mastercard)</strong>
+              <small>Simulated 3D Secure Verification</small>
+            </span>
+          </label>
+        </div>
+
+        <!-- Simulated Gateway Modal / Progress Box -->
+        <div id="gateway-modal" class="gateway-modal hidden">
+          <div class="gateway-box">
+            <div class="spinner"></div>
+            <h4 id="gateway-modal-title">Connecting to Bank Switch...</h4>
+            <p id="gateway-modal-desc">Simulating secure interbank authorization.</p>
+            <div id="gateway-timer-display" class="gateway-subtext">Elapsed: 0s</div>
+          </div>
+        </div>
+
+        <!-- Conflict & Automated Refund Alert Box -->
+        <div id="conflict-refund-alert" class="alert-box alert-conflict hidden">
+          <div class="alert-icon">⚠️</div>
+          <div class="alert-body">
+            <h4 id="conflict-alert-title">Payment Conflict & Immediate Refund</h4>
+            <p id="conflict-alert-message"></p>
+            <div id="conflict-refund-meta" class="refund-meta"></div>
+            <button id="btn-conflict-return" class="btn btn-outline btn-sm">Return to Seat Map</button>
+          </div>
+        </div>
+
+        <div class="payment-actions">
+          <button id="btn-back-to-fare" class="btn btn-outline">← Back to Summary</button>
+          <button id="btn-submit-payment" class="btn btn-success btn-lg">
+            🔒 Pay <span id="btn-pay-amount">₹0</span> Now
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 5: CONFIRMATION & TICKET PASS -->
+    <section id="step-confirmation" class="step-view">
+      <!-- Watermark for Dev Mode Bookings -->
+      <div id="dev-watermark" class="dev-watermark-banner hidden">
+        ⚠️ DEV SIMULATION TEST BOOKING — NOT VALID FOR REAL BUS TRAVEL ⚠️
+      </div>
+
+      <div class="ticket-container">
+        <div class="ticket-card">
+          <div class="ticket-header">
+            <div class="ticket-brand">
+              <span class="ticket-logo">🚌</span>
+              <div>
+                <h3>BusLane Intercity</h3>
+                <small>Route BL-PN-01 • Confirmed Ticket</small>
+              </div>
+            </div>
+            <div class="ticket-pnr">
+              <span class="pnr-label">Booking Reference</span>
+              <strong id="ticket-booking-ref">BL-PN-000000</strong>
+            </div>
+          </div>
+
+          <div class="ticket-body">
+            <div class="ticket-grid">
+              <div class="ticket-col">
+                <span class="meta-title">Route & Departure</span>
+                <strong class="meta-val">Pune → Nashik</strong>
+                <span class="meta-sub">Today • 22:30 IST</span>
+              </div>
+              <div class="ticket-col">
+                <span class="meta-title">Boarding Point</span>
+                <strong id="ticket-boarding-point" class="meta-val">Pune Swargate</strong>
+                <span id="ticket-boarding-time" class="meta-sub">22:30 IST</span>
+              </div>
+              <div class="ticket-col">
+                <span class="meta-title">Confirmed Seats</span>
+                <strong id="ticket-seats-list" class="meta-val highlight-seats">1A, 1B</strong>
+                <span class="meta-sub">Single Deck Coach</span>
+              </div>
+            </div>
+
+            <div class="ticket-passengers">
+              <span class="meta-title">Passenger Manifest</span>
+              <div id="ticket-passenger-roster"></div>
+            </div>
+
+            <div class="ticket-fare-summary">
+              <div class="fare-paid-row">
+                <span>Amount Paid (Incl. 5% GST):</span>
+                <strong id="ticket-paid-amount" class="text-accent">₹0</strong>
+              </div>
+              <div class="fare-paid-row">
+                <span>Payment Reference:</span>
+                <small id="ticket-txn-id" class="font-mono">TXN-000000</small>
+              </div>
+              <div class="fare-paid-row">
+                <span>Status:</span>
+                <span id="ticket-status-pill" class="status-pill status-paid">CONFIRMED (PAID)</span>
+              </div>
+            </div>
+
+            <!-- Simulated QR Code Pass for Driver -->
+            <div class="ticket-qr-section">
+              <div class="qr-placeholder" title="Digital Pass for Driver Verification">
+                <div class="qr-pattern"></div>
+                <small class="qr-code-text">BL-DRIVER-VERIFY</small>
+              </div>
+              <div class="qr-instructions">
+                <p><strong>Show this digital pass to the driver at boarding.</strong></p>
+                <small>Valid photo ID matching passenger names required at conductor check-in.</small>
+              </div>
+            </div>
+          </div>
+
+          <div class="ticket-actions">
+            <button onclick="window.print()" class="btn btn-outline">🖨️ Print / Save Ticket PDF</button>
+            <button id="btn-simulate-cancel" class="btn btn-danger-outline">Cancel Booking & Simulate Refund</button>
+            <button id="btn-book-another" class="btn btn-primary">Book Another Trip</button>
+          </div>
+
+          <div id="cancellation-feedback" class="alert-box alert-refund hidden"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- FLOATING TEST HARNESS DOCK (?dev=1) -->
+  <aside id="dev-panel" class="dev-panel">
+    <div class="dev-panel-header">
+      <div class="dev-title">
+        <span class="dev-icon">🧪</span>
+        <span>Test Mode Controls</span>
+        <span class="dev-build-pill" id="dev-build-version">v1.0.4</span>
+      </div>
+      <div class="dev-panel-actions">
+        <button id="dev-minimize-btn" class="dev-tool-btn" title="Minimize Panel">_</button>
+      </div>
+    </div>
+
+    <div class="dev-panel-body">
+      <!-- Fast Stage Jump Buttons -->
+      <div class="dev-section">
+        <label class="dev-section-title">Jump to Stage</label>
+        <div class="dev-btn-group">
+          <button class="dev-btn dev-jump-btn" data-target="1">1. Seat Map</button>
+          <button class="dev-btn dev-jump-btn" data-target="2">2. Details</button>
+          <button class="dev-btn dev-jump-btn" data-target="3">3. Fare</button>
+          <button class="dev-btn dev-jump-btn" data-target="4">4. Payment</button>
+          <button class="dev-btn dev-jump-btn" data-target="5">5. Ticket</button>
+        </div>
+      </div>
+
+      <!-- Hold Timer Manipulation -->
+      <div class="dev-section">
+        <label class="dev-section-title">Hold & Timer Controls</label>
+        <div class="dev-btn-row">
+          <button id="dev-expire-hold-btn" class="dev-btn dev-btn-danger">⚡ Expire Hold Immediately</button>
+        </div>
+        <div class="dev-control-row">
+          <span>Set Hold Duration:</span>
+          <select id="dev-hold-duration-select" class="dev-select">
+            <option value="5">5 seconds (Quick Expiry)</option>
+            <option value="20">20 seconds (Race Testing)</option>
+            <option value="60">60 seconds (1 minute)</option>
+            <option value="600" selected>600 seconds (10 mins - Default)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Simulated Gateway Behaviors -->
+      <div class="dev-section">
+        <label class="dev-section-title">Simulated Payment Gateway Mode</label>
+        <div class="dev-radio-group">
+          <label><input type="radio" name="dev-gateway-mode" value="SUCCESS" checked> Instant Success</label>
+          <label><input type="radio" name="dev-gateway-mode" value="FAIL"> Force Failure / Card Decline</label>
+          <label><input type="radio" name="dev-gateway-mode" value="TIMEOUT"> Hang / Timeout (Bank Switch Drop)</label>
+          <label><input type="radio" name="dev-gateway-mode" value="LATE_SUCCESS"> Succeed Late (After Hold Expired)</label>
+        </div>
+      </div>
+
+      <!-- Concurrency & Seat Theft Simulator -->
+      <div class="dev-section">
+        <label class="dev-section-title">Concurrency & Race Simulator</label>
+        <div class="dev-btn-row">
+          <button id="dev-steal-seat-btn" class="dev-btn dev-btn-warning">🥷 Steal My Held Seat</button>
+        </div>
+        <small class="dev-hint">Simulates Customer B booking your held seat while you are on details/payment.</small>
+      </div>
+
+      <!-- Seat Map State Presets in 1 Action -->
+      <div class="dev-section">
+        <label class="dev-section-title">Instant Seat Map Presets</label>
+        <div class="dev-btn-grid">
+          <button class="dev-btn dev-preset-btn" data-preset="empty">All Empty</button>
+          <button class="dev-btn dev-preset-btn" data-preset="one-left">1 Seat Left (8D)</button>
+          <button class="dev-btn dev-preset-btn" data-preset="full">Bus Full (32)</button>
+          <button class="dev-btn dev-preset-btn" data-preset="ladies-gone">Ladies Seats Gone</button>
+        </div>
+      </div>
+
+      <!-- Dynamic Fare Updater -->
+      <div class="dev-section">
+        <label class="dev-section-title">Dynamic Base Fare (Mid-Session Surge)</label>
+        <div class="dev-input-row">
+          <span>₹</span>
+          <input type="number" id="dev-base-fare-input" class="dev-input" value="450" step="50" min="100">
+          <button id="dev-update-fare-btn" class="dev-btn dev-btn-primary">Update Fare</button>
+        </div>
+      </div>
+
+      <!-- Network Latency Throttler -->
+      <div class="dev-section">
+        <label class="dev-section-title">Network Latency Throttling</label>
+        <div class="dev-control-row">
+          <span>Simulated Lag:</span>
+          <select id="dev-latency-select" class="dev-select">
+            <option value="0" selected>0ms (Normal)</option>
+            <option value="1500">1,500ms (Slow 3G)</option>
+            <option value="3000">3,000ms (High Latency)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Global State Reset -->
+      <div class="dev-section">
+        <button id="dev-reset-all-btn" class="dev-btn dev-btn-danger-outline">🔄 Clear All Bookings & Holds</button>
+      </div>
+
+      <!-- Live Raw State Inspector & 1-Click Copy -->
+      <div class="dev-section">
+        <div class="dev-section-header-flex">
+          <label class="dev-section-title">Live Raw State Inspector</label>
+          <button id="dev-copy-state-btn" class="dev-btn dev-btn-copy">📋 Copy State JSON</button>
+        </div>
+        <pre id="dev-raw-state-pre" class="dev-raw-state"></pre>
+      </div>
+    </div>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>
