@@ -1,6 +1,432 @@
 // public/app.js
 // BusLane Client Application & Distributed Verification Suite
+// Dual-mode architecture: seamlessly connects to Node.js Express backend OR falls back
+// to an embedded in-browser engine with BroadcastChannel for 100% functionality on static hosts like Netlify!
 
+class LocalMockEngine {
+  constructor() {
+    this.STORAGE_KEY = 'buslane_local_state';
+    this.channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('buslane_sync_channel') : null;
+    this.LADIES_SEATS = new Set(['3A', '3B', '4A', '4B']);
+    this.BOARDING_POINTS = [
+      { id: 'bp_1', name: 'Pune Swargate', time: '22:30 IST', landmark: 'Platform 3, Opp. Bus Depot' },
+      { id: 'bp_2', name: 'Shivaji Nagar', time: '22:50 IST', landmark: 'Under Flyover, Bus Lane' },
+      { id: 'bp_3', name: 'Nashik Phata', time: '23:15 IST', landmark: 'Kasargawadi Signal' },
+      { id: 'bp_4', name: 'Bhosari', time: '23:45 IST', landmark: 'Landewadi Chowk' }
+    ];
+    this.loadState();
+    this.startReaper();
+  }
+
+  loadState() {
+    const raw = localStorage.getItem(this.STORAGE_KEY);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        this.seats = parsed.seats || this.createSeats();
+        this.holdSessions = parsed.holdSessions || {};
+        this.bookings = parsed.bookings || {};
+        this.refundLedger = parsed.refundLedger || [];
+        this.baseFare = parsed.baseFare || 450;
+        this.gatewayMode = parsed.gatewayMode || 'SUCCESS';
+        this.defaultHoldDuration = parsed.defaultHoldDuration || 600;
+        return;
+      } catch (err) {}
+    }
+    this.resetState();
+  }
+
+  saveState() {
+    localStorage.setItem(this.STORAGE_KEY, JSON.stringify({
+      seats: this.seats,
+      holdSessions: this.holdSessions,
+      bookings: this.bookings,
+      refundLedger: this.refundLedger,
+      baseFare: this.baseFare,
+      gatewayMode: this.gatewayMode,
+      defaultHoldDuration: this.defaultHoldDuration
+    }));
+  }
+
+  notifyBroadcast(type, payload = {}) {
+    this.saveState();
+    if (this.channel) {
+      this.channel.postMessage({ type, payload, state: this.getClientState() });
+    }
+  }
+
+  createSeats() {
+    const seats = {};
+    for (let row = 1; row <= 8; row++) {
+      ['A', 'B', 'C', 'D'].forEach(col => {
+        const id = `${row}${col}`;
+        seats[id] = {
+          id,
+          row,
+          col,
+          isLadies: this.LADIES_SEATS.has(id),
+          isWindow: col === 'A' || col === 'D',
+          isAisle: col === 'B' || col === 'C',
+          status: 'AVAILABLE',
+          holdToken: null,
+          holdExpiresAt: null,
+          bookingRef: null
+        };
+      });
+    }
+    return seats;
+  }
+
+  resetState() {
+    this.seats = this.createSeats();
+    this.holdSessions = {};
+    this.bookings = {};
+    this.refundLedger = [];
+    this.baseFare = 450;
+    this.gatewayMode = 'SUCCESS';
+    this.defaultHoldDuration = 600;
+    this.saveState();
+  }
+
+  startReaper() {
+    setInterval(() => {
+      this.reap();
+    }, 1000);
+  }
+
+  reap() {
+    const now = Date.now();
+    let changed = false;
+    for (const [token, session] of Object.entries(this.holdSessions)) {
+      if (now > session.expiresAt) {
+        session.seatIds.forEach(sid => {
+          if (this.seats[sid] && this.seats[sid].holdToken === token) {
+            this.seats[sid].status = 'AVAILABLE';
+            this.seats[sid].holdToken = null;
+            this.seats[sid].holdExpiresAt = null;
+            changed = true;
+          }
+        });
+        delete this.holdSessions[token];
+      }
+    }
+    if (changed) {
+      this.notifyBroadcast('HOLDS_EXPIRED');
+    }
+  }
+
+  getClientState(token = null) {
+    const now = Date.now();
+    const sanitized = {};
+    for (const [id, s] of Object.entries(this.seats)) {
+      let displayStatus = s.status;
+      let isMyHold = false;
+      let remainingSec = 0;
+      if (s.status === 'HELD') {
+        if (s.holdExpiresAt && now > s.holdExpiresAt) {
+          displayStatus = 'AVAILABLE';
+        } else {
+          isMyHold = token && s.holdToken === token;
+          remainingSec = s.holdExpiresAt ? Math.max(0, Math.ceil((s.holdExpiresAt - now) / 1000)) : 0;
+        }
+      }
+      sanitized[id] = {
+        id: s.id,
+        row: s.row,
+        col: s.col,
+        isLadies: s.isLadies,
+        isWindow: s.isWindow,
+        isAisle: s.isAisle,
+        status: displayStatus,
+        isMyHold,
+        remainingSec
+      };
+    }
+    return {
+      route: {
+        number: 'BL-PN-01',
+        from: 'Pune',
+        to: 'Nashik',
+        departureTime: '22:30 IST',
+        boardingPoints: this.BOARDING_POINTS
+      },
+      seats: sanitized,
+      baseFare: this.baseFare,
+      convenienceFee: 30,
+      gstPercent: 5,
+      serverTime: now,
+      buildInfo: { version: 'v1.0.4-netlify-ready', environment: 'static-browser-sync' }
+    };
+  }
+
+  calculateFare(count, baseOverride = null) {
+    const base = baseOverride || this.baseFare;
+    const subtotal = base * count;
+    const fee = count > 0 ? 30 : 0;
+    const taxable = subtotal + fee;
+    const gst = Math.round(taxable * 0.05);
+    return {
+      seatCount: count,
+      baseFarePerSeat: base,
+      seatSubtotal: subtotal,
+      convenienceFee: fee,
+      taxableAmount: taxable,
+      gstPercent: 5,
+      gstAmount: gst,
+      grandTotal: taxable + gst
+    };
+  }
+
+  toggleSeat(seatId, existingToken) {
+    this.loadState();
+    const now = Date.now();
+    const seat = this.seats[seatId];
+    if (!seat) throw { code: 404, message: 'Seat not found' };
+
+    let session = existingToken ? this.holdSessions[existingToken] : null;
+    if (session && now > session.expiresAt) {
+      delete this.holdSessions[existingToken];
+      session = null;
+    }
+
+    if (session && seat.status === 'HELD' && seat.holdToken === session.holdToken) {
+      // Release
+      seat.status = 'AVAILABLE';
+      seat.holdToken = null;
+      seat.holdExpiresAt = null;
+      session.seatIds = session.seatIds.filter(id => id !== seatId);
+      if (session.seatIds.length === 0) {
+        delete this.holdSessions[session.holdToken];
+        this.notifyBroadcast('SEAT_RELEASED');
+        return { holdToken: null, selectedSeats: [], remainingSec: 0 };
+      }
+      this.notifyBroadcast('SEAT_RELEASED');
+      return {
+        holdToken: session.holdToken,
+        selectedSeats: session.seatIds,
+        expiresAt: session.expiresAt,
+        remainingSec: Math.max(0, Math.ceil((session.expiresAt - now) / 1000))
+      };
+    }
+
+    if (seat.status === 'BOOKED') throw { code: 409, message: 'Seat is already booked.' };
+    if (seat.status === 'HELD' && (!session || seat.holdToken !== session.holdToken)) {
+      throw { code: 409, message: 'Seat was just reserved by another passenger.' };
+    }
+
+    const currentCount = session ? session.seatIds.length : 0;
+    if (currentCount >= 4) throw { code: 400, message: 'Maximum 4 seats allowed per booking.' };
+
+    if (!session) {
+      const newToken = 'hold_local_' + Math.random().toString(36).substring(2, 9);
+      const duration = this.defaultHoldDuration;
+      const expiresAt = now + (duration * 1000);
+      session = {
+        holdToken: newToken,
+        seatIds: [seatId],
+        lockedBaseFare: this.baseFare,
+        createdAt: now,
+        expiresAt,
+        durationSeconds: duration,
+        passengerData: [],
+        boardingPointId: 'bp_1'
+      };
+      this.holdSessions[newToken] = session;
+    } else {
+      session.seatIds.push(seatId);
+    }
+
+    seat.status = 'HELD';
+    seat.holdToken = session.holdToken;
+    seat.holdExpiresAt = session.expiresAt;
+
+    this.notifyBroadcast('SEAT_HELD');
+    return {
+      holdToken: session.holdToken,
+      selectedSeats: session.seatIds,
+      expiresAt: session.expiresAt,
+      remainingSec: Math.max(0, Math.ceil((session.expiresAt - now) / 1000)),
+      lockedBaseFare: session.lockedBaseFare
+    };
+  }
+
+  savePassengers(token, { passengers, infants = [], boardingPointId }) {
+    this.loadState();
+    const session = this.holdSessions[token];
+    if (!session || Date.now() > session.expiresAt) {
+      throw { code: 400, message: 'Hold session expired.' };
+    }
+    const bp = this.BOARDING_POINTS.find(p => p.id === boardingPointId) || this.BOARDING_POINTS[0];
+    session.passengerData = passengers.map((p, idx) => ({
+      seatId: session.seatIds[idx],
+      name: p.name,
+      age: p.age,
+      gender: p.gender,
+      phone: p.phone
+    }));
+    session.infants = infants;
+    session.boardingPointId = boardingPointId;
+    this.saveState();
+    return {
+      status: 'DETAILS_SAVED',
+      fare: this.calculateFare(session.seatIds.length, session.lockedBaseFare),
+      boardingPoint: bp
+    };
+  }
+
+  pay({ holdToken, paymentMethod }) {
+    this.loadState();
+    const now = Date.now();
+    const session = this.holdSessions[holdToken];
+
+    if (!session || now > session.expiresAt || this.gatewayMode === 'LATE_SUCCESS') {
+      const refundId = 'REF-AUTO-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+      this.refundLedger.push({ refundTxnId: refundId, timestamp: now, amount: 504 });
+      this.saveState();
+      throw {
+        code: 409,
+        type: 'LATE_PAYMENT_REFUNDED',
+        message: 'Payment received after hold expired. Full automatic refund initiated.',
+        refundDetails: { refundTxnId: refundId, amount: 504, reason: 'SEAT_TAKEN_BY_ANOTHER' }
+      };
+    }
+
+    if (this.gatewayMode === 'FAIL') {
+      throw { code: 402, message: 'Payment declined by issuing bank (Simulated Failure).' };
+    }
+    if (this.gatewayMode === 'TIMEOUT') {
+      throw { code: 504, message: 'Payment gateway timed out.' };
+    }
+
+    const bookingRef = 'BL-PN-' + Math.floor(100000 + Math.random() * 900000);
+    const txnId = 'TXN-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+
+    session.seatIds.forEach(sid => {
+      this.seats[sid].status = 'BOOKED';
+      this.seats[sid].holdToken = null;
+      this.seats[sid].holdExpiresAt = null;
+      this.seats[sid].bookingRef = bookingRef;
+    });
+
+    const bp = this.BOARDING_POINTS.find(p => p.id === session.boardingPointId) || this.BOARDING_POINTS[0];
+    const fare = this.calculateFare(session.seatIds.length, session.lockedBaseFare);
+
+    const booking = {
+      bookingRef,
+      holdToken,
+      seatIds: [...session.seatIds],
+      passengers: session.passengerData,
+      infants: session.infants || [],
+      boardingPoint: bp,
+      departureTime: '22:30 IST',
+      fareSummary: fare,
+      paymentStatus: 'PAID',
+      paymentTxnId: txnId,
+      createdAt: now
+    };
+
+    this.bookings[bookingRef] = booking;
+    delete this.holdSessions[holdToken];
+
+    this.notifyBroadcast('SEATS_BOOKED');
+    return { status: 'CONFIRMED', booking };
+  }
+
+  cancelBooking(ref) {
+    this.loadState();
+    const booking = this.bookings[ref];
+    if (!booking) throw { code: 404, message: 'Booking not found' };
+    booking.cancelledAt = Date.now();
+    booking.refundStatus = 'CANCELLATION_CONFIRMED_REFUND_INITIATED';
+    booking.seatIds.forEach(sid => {
+      if (this.seats[sid]) {
+        this.seats[sid].status = 'AVAILABLE';
+        this.seats[sid].bookingRef = null;
+      }
+    });
+    this.notifyBroadcast('SEATS_RELEASED');
+    return {
+      status: 'CANCELLED',
+      bookingRef: ref,
+      refundStatus: booking.refundStatus,
+      refundAmount: Math.round(booking.fareSummary.grandTotal * 0.5),
+      estimatedSettlementDays: '5-7 working days'
+    };
+  }
+
+  devExpireHold(token) {
+    this.loadState();
+    if (this.holdSessions[token]) {
+      this.holdSessions[token].expiresAt = Date.now() - 1000;
+      this.reap();
+      return { success: true, message: 'Hold expired immediately.' };
+    }
+    return { success: false, message: 'Session not found' };
+  }
+
+  devStealSeat(seatId) {
+    this.loadState();
+    if (!this.seats[seatId]) throw { code: 404, message: 'Seat not found' };
+    this.seats[seatId].status = 'BOOKED';
+    this.seats[seatId].bookingRef = 'BL-DEV-STOLEN';
+    this.seats[seatId].holdToken = null;
+    this.seats[seatId].holdExpiresAt = null;
+    this.notifyBroadcast('SEAT_HIJACKED');
+    return { success: true, seatId, bookingRef: 'BL-DEV-STOLEN' };
+  }
+
+  devSetPreset(preset) {
+    this.resetState();
+    if (preset === 'one-left') {
+      Object.values(this.seats).forEach(s => {
+        if (s.id !== '8D') {
+          s.status = 'BOOKED';
+          s.bookingRef = 'BL-DEV-PRESET';
+        }
+      });
+    } else if (preset === 'full') {
+      Object.values(this.seats).forEach(s => {
+        s.status = 'BOOKED';
+        s.bookingRef = 'BL-DEV-PRESET';
+      });
+    } else if (preset === 'ladies-gone') {
+      this.LADIES_SEATS.forEach(id => {
+        this.seats[id].status = 'BOOKED';
+        this.seats[id].bookingRef = 'BL-DEV-LADIES';
+      });
+    }
+    this.notifyBroadcast('PRESET_APPLIED');
+    return { success: true, preset };
+  }
+
+  getRawState() {
+    this.loadState();
+    const seatsArray = Object.values(this.seats).map(s => ({
+      id: s.id,
+      status: s.status,
+      holdToken: s.holdToken,
+      holdExpiresAt: s.holdExpiresAt,
+      bookingRef: s.bookingRef
+    }));
+    return {
+      timestamp: new Date().toISOString(),
+      mode: 'Client-Side Engine (Netlify Ready)',
+      baseFare: this.baseFare,
+      gatewayMode: this.gatewayMode,
+      activeHolds: Object.keys(this.holdSessions).length,
+      bookingsCount: Object.keys(this.bookings).length,
+      stats: {
+        totalSeats: 32,
+        available: seatsArray.filter(s => s.status === 'AVAILABLE').length,
+        held: seatsArray.filter(s => s.status === 'HELD').length,
+        booked: seatsArray.filter(s => s.status === 'BOOKED').length
+      },
+      seats: seatsArray
+    };
+  }
+}
+
+// Global Browser App Controller
 class BusLaneApp {
   constructor() {
     this.currentStep = 1;
@@ -16,9 +442,12 @@ class BusLaneApp {
     this.gatewayTimerInterval = null;
     this.eventSource = null;
     this.isDevMode = false;
-    this.serverTimeOffset = 0; // serverNow - clientNow
+    this.serverTimeOffset = 0;
     this.infants = [];
     this.confirmedBooking = null;
+
+    this.localEngine = new LocalMockEngine();
+    this.isStaticMode = false; // toggles to true on Netlify / pure static hosting
 
     this.init();
   }
@@ -31,7 +460,126 @@ class BusLaneApp {
     this.startDevStatePoller();
   }
 
-  // --- Dev Mode Detection (?dev=1) ---
+  // Dual-mode API requester: delegates to local engine if server is unreachable / static
+  async apiRequest(url, options = {}) {
+    if (!this.isStaticMode) {
+      try {
+        const res = await fetch(url, options);
+        if (res.status === 404 && url.startsWith('/api/')) {
+          this.activateStaticMode();
+        } else {
+          return res;
+        }
+      } catch (err) {
+        this.activateStaticMode();
+      }
+    }
+
+    // Static In-Browser Fallback Router
+    return this.routeLocalMock(url, options);
+  }
+
+  activateStaticMode() {
+    if (this.isStaticMode) return;
+    this.isStaticMode = true;
+    console.log('[BusLane] Static host detected (Netlify). Activated in-browser state engine & BroadcastChannel sync.');
+    const syncPill = document.getElementById('sync-status');
+    if (syncPill) {
+      syncPill.classList.add('online');
+      syncPill.querySelector('.sync-label').textContent = 'Live Sync (Browser)';
+    }
+
+    if (this.localEngine.channel) {
+      this.localEngine.channel.onmessage = (e) => {
+        if (e.data && e.data.state) {
+          this.applyServerState(e.data.state);
+        }
+      };
+    }
+  }
+
+  routeLocalMock(url, options = {}) {
+    const body = options.body ? JSON.parse(options.body) : {};
+    const method = options.method || 'GET';
+
+    try {
+      if (url.startsWith('/api/state')) {
+        const token = new URLSearchParams(url.split('?')[1]).get('token');
+        return { ok: true, status: 200, json: async () => this.localEngine.getClientState(token) };
+      }
+      if (url.startsWith('/api/hold/session')) {
+        const token = new URLSearchParams(url.split('?')[1]).get('token');
+        const sess = this.localEngine.holdSessions[token];
+        if (!sess) return { ok: false, status: 404, json: async () => ({ error: 'Session expired' }) };
+        const remainingSec = Math.max(0, Math.ceil((sess.expiresAt - Date.now()) / 1000));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            holdToken: sess.holdToken,
+            seatIds: sess.seatIds,
+            remainingSec,
+            expiresAt: sess.expiresAt
+          })
+        };
+      }
+      if (url === '/api/hold/toggle') {
+        const res = this.localEngine.toggleSeat(body.seatId, body.holdToken);
+        return { ok: true, status: 200, json: async () => res };
+      }
+      if (url === '/api/passengers') {
+        const res = this.localEngine.savePassengers(body.token, body);
+        return { ok: true, status: 200, json: async () => res };
+      }
+      if (url === '/api/pay') {
+        const res = this.localEngine.pay(body);
+        return { ok: true, status: 200, json: async () => res };
+      }
+      if (url === '/api/booking/cancel') {
+        const res = this.localEngine.cancelBooking(body.bookingRef);
+        return { ok: true, status: 200, json: async () => res };
+      }
+      if (url === '/api/dev/expire-hold') {
+        const res = this.localEngine.devExpireHold(body.token);
+        return { ok: true, status: 200, json: async () => res };
+      }
+      if (url === '/api/dev/set-hold-duration') {
+        this.localEngine.defaultHoldDuration = parseInt(body.durationSec, 10);
+        return { ok: true, status: 200, json: async () => ({ success: true }) };
+      }
+      if (url === '/api/dev/set-gateway-mode') {
+        this.localEngine.gatewayMode = body.mode;
+        return { ok: true, status: 200, json: async () => ({ success: true }) };
+      }
+      if (url === '/api/dev/steal-seat') {
+        const res = this.localEngine.devStealSeat(body.seatId);
+        return { ok: true, status: 200, json: async () => res };
+      }
+      if (url === '/api/dev/preset') {
+        const res = this.localEngine.devSetPreset(body.preset);
+        return { ok: true, status: 200, json: async () => res };
+      }
+      if (url === '/api/dev/set-base-fare') {
+        this.localEngine.baseFare = parseInt(body.baseFare, 10);
+        return { ok: true, status: 200, json: async () => ({ success: true }) };
+      }
+      if (url === '/api/dev/reset') {
+        this.localEngine.resetState();
+        return { ok: true, status: 200, json: async () => ({ success: true }) };
+      }
+      if (url === '/api/dev/raw-state') {
+        return { ok: true, status: 200, json: async () => this.localEngine.getRawState() };
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        status: err.code || 500,
+        json: async () => ({ error: err.message, type: err.type, refundDetails: err.refundDetails })
+      };
+    }
+    return { ok: false, status: 404, json: async () => ({ error: 'Not found' }) };
+  }
+
   detectDevMode() {
     const params = new URLSearchParams(window.location.search);
     if (params.get('dev') === '1') {
@@ -55,37 +603,32 @@ class BusLaneApp {
     if (badge) badge.classList.toggle('active', this.isDevMode);
   }
 
-  // --- Real-Time Server-Sent Events (SSE) Sync ---
   initRealtimeSSE() {
     const syncPill = document.getElementById('sync-status');
     const tokenParam = this.holdToken ? `?token=${this.holdToken}` : '';
 
-    if (this.eventSource) {
-      this.eventSource.close();
+    if (this.eventSource) this.eventSource.close();
+
+    try {
+      this.eventSource = new EventSource(`/api/events${tokenParam}`);
+      this.eventSource.onopen = () => {
+        syncPill.classList.add('online');
+        syncPill.querySelector('.sync-label').textContent = 'Live Sync';
+      };
+      this.eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          this.handleServerBroadcast(payload);
+        } catch (err) {}
+      };
+      this.eventSource.onerror = () => {
+        // If SSE fails (e.g. on Netlify static host), gracefully switch to static broadcast sync
+        this.activateStaticMode();
+      };
+    } catch (err) {
+      this.activateStaticMode();
     }
 
-    this.eventSource = new EventSource(`/api/events${tokenParam}`);
-
-    this.eventSource.onopen = () => {
-      syncPill.classList.add('online');
-      syncPill.querySelector('.sync-label').textContent = 'Live Sync';
-    };
-
-    this.eventSource.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        this.handleServerBroadcast(payload);
-      } catch (err) {
-        console.error('[SSE Error parsing message]', err);
-      }
-    };
-
-    this.eventSource.onerror = () => {
-      syncPill.classList.remove('online');
-      syncPill.querySelector('.sync-label').textContent = 'Reconnecting...';
-    };
-
-    // Auto-resync when returning from phone lock or background tab
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
         this.fetchFullState();
@@ -94,28 +637,21 @@ class BusLaneApp {
   }
 
   handleServerBroadcast(payload) {
-    if (payload.state) {
-      this.applyServerState(payload.state);
-    }
-
-    if (payload.type === 'HOLDS_EXPIRED') {
-      if (this.holdToken) {
-        this.verifyHoldStatus();
-      }
+    if (payload.state) this.applyServerState(payload.state);
+    if (payload.type === 'HOLDS_EXPIRED' && this.holdToken) {
+      this.verifyHoldStatus();
     }
   }
 
   async fetchFullState() {
     try {
       const url = this.holdToken ? `/api/state?token=${this.holdToken}` : '/api/state';
-      const res = await fetch(url);
+      const res = await this.apiRequest(url);
       if (res.ok) {
         const data = await res.json();
         this.applyServerState(data);
       }
-    } catch (err) {
-      console.warn('[Fetch State Failed]', err);
-    }
+    } catch (err) {}
   }
 
   applyServerState(state) {
@@ -125,7 +661,6 @@ class BusLaneApp {
     this.convenienceFee = state.convenienceFee || 30;
     this.gstPercent = state.gstPercent || 5;
 
-    // Calculate server clock delta
     if (state.serverTime) {
       this.serverTimeOffset = state.serverTime - Date.now();
     }
@@ -137,15 +672,13 @@ class BusLaneApp {
     this.updatePricePreview();
   }
 
-  // --- Session Recovery on Page Reload / Tab Reopen ---
   async checkSessionRecovery() {
     if (!this.holdToken) {
       this.fetchFullState();
       return;
     }
-
     try {
-      const res = await fetch(`/api/hold/session?token=${this.holdToken}`);
+      const res = await this.apiRequest(`/api/hold/session?token=${this.holdToken}`);
       if (res.ok) {
         const session = await res.json();
         this.selectedSeats = session.seatIds || [];
@@ -154,11 +687,10 @@ class BusLaneApp {
         this.renderSelectedChips();
         this.updatePricePreview();
       } else {
-        // Session expired while user was away
         this.clearLocalHold();
       }
     } catch (err) {
-      console.warn('[Session Recovery Error]', err);
+      this.clearLocalHold();
     }
     this.fetchFullState();
   }
@@ -175,13 +707,11 @@ class BusLaneApp {
     this.updatePricePreview();
   }
 
-  // --- Monotonic Hold Timer (Immune to Local OS Clock Jumps) ---
   startHoldTimer(initialRemainingSec) {
     clearInterval(this.holdTimerInterval);
     const banner = document.getElementById('hold-banner');
     const countdownEl = document.getElementById('hold-countdown');
     const progressEl = document.getElementById('hold-progress-bar');
-
     banner.classList.remove('hidden');
 
     let remaining = initialRemainingSec;
@@ -195,7 +725,6 @@ class BusLaneApp {
         this.handleHoldExpiredLocally();
         return;
       }
-
       const mins = Math.floor(remaining / 60);
       const secs = remaining % 60;
       countdownEl.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
@@ -218,14 +747,11 @@ class BusLaneApp {
   async verifyHoldStatus() {
     if (!this.holdToken) return;
     try {
-      const res = await fetch(`/api/hold/session?token=${this.holdToken}`);
-      if (!res.ok) {
-        this.handleHoldExpiredLocally();
-      }
+      const res = await this.apiRequest(`/api/hold/session?token=${this.holdToken}`);
+      if (!res.ok) this.handleHoldExpiredLocally();
     } catch (err) {}
   }
 
-  // --- Seat Map Rendering ---
   renderSeatMap() {
     const colAB = document.getElementById('seats-col-a-b');
     const colCD = document.getElementById('seats-col-c-d');
@@ -257,9 +783,7 @@ class BusLaneApp {
 
     const isSelectedByMe = this.selectedSeats.includes(seat.id) || seat.isMyHold;
 
-    if (seat.isLadies) {
-      btn.classList.add('ladies');
-    }
+    if (seat.isLadies) btn.classList.add('ladies');
 
     if (seat.status === 'BOOKED') {
       btn.classList.add('booked');
@@ -286,17 +810,11 @@ class BusLaneApp {
     }
 
     btn.innerHTML = innerHTML;
-
-    btn.addEventListener('click', () => {
-      this.handleSeatClick(seat.id);
-    });
-
+    btn.addEventListener('click', () => this.handleSeatClick(seat.id));
     return btn;
   }
 
-  // --- Seat Selection Mutation (Atomic Hold Request) ---
   async handleSeatClick(seatId) {
-    // Prevent selecting more than 4 seats client-side
     const isAlreadySelected = this.selectedSeats.includes(seatId);
     if (!isAlreadySelected && this.selectedSeats.length >= 4) {
       alert('Maximum 4 seats allowed per booking.');
@@ -304,17 +822,13 @@ class BusLaneApp {
     }
 
     try {
-      const res = await fetch('/api/hold/toggle', {
+      const res = await this.apiRequest('/api/hold/toggle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          seatId,
-          holdToken: this.holdToken
-        })
+        body: JSON.stringify({ seatId, holdToken: this.holdToken })
       });
 
       const data = await res.json();
-
       if (!res.ok) {
         alert(data.error || 'Failed to select seat.');
         this.fetchFullState();
@@ -328,7 +842,6 @@ class BusLaneApp {
         this.holdExpiresAt = data.expiresAt;
         this.startHoldTimer(data.remainingSec);
       } else {
-        // Zero seats remaining in session
         this.clearLocalHold();
       }
 
@@ -336,7 +849,7 @@ class BusLaneApp {
       this.updatePricePreview();
       this.fetchFullState();
     } catch (err) {
-      alert('Network error communicating with reservation server.');
+      alert('Error updating seat reservation.');
     }
   }
 
@@ -361,34 +874,27 @@ class BusLaneApp {
   updatePricePreview() {
     const previewEl = document.getElementById('seatmap-price-preview');
     if (!previewEl) return;
-
     const count = this.selectedSeats.length;
     if (count === 0) {
       previewEl.textContent = '₹0';
       return;
     }
-
     const base = this.currentBaseFare * count;
     const fee = this.convenienceFee;
     const taxable = base + fee;
     const gst = Math.round(taxable * (this.gstPercent / 100));
-    const total = taxable + gst;
-
-    previewEl.textContent = `₹${total}`;
+    previewEl.textContent = `₹${taxable + gst}`;
   }
 
-  // --- Step 2: Passenger Details Form Setup ---
   renderPassengerForms() {
     const container = document.getElementById('passengers-form-container');
     if (!container) return;
-
     container.innerHTML = '';
 
     this.selectedSeats.forEach((seatId, idx) => {
       const isLadies = ['3A', '3B', '4A', '4B'].includes(seatId);
       const card = document.createElement('div');
       card.className = `card passenger-card ${isLadies ? 'ladies-assigned' : ''}`;
-
       card.innerHTML = `
         <div class="passenger-header">
           <h4>Passenger ${idx + 1}</h4>
@@ -396,7 +902,6 @@ class BusLaneApp {
             Seat ${seatId} ${isLadies ? '• Ladies Only ♀' : '• General'}
           </span>
         </div>
-
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Full Name (as on ID) *</label>
@@ -421,7 +926,6 @@ class BusLaneApp {
             </select>
           </div>
         </div>
-
         ${idx === 0 ? `
           <div class="form-group">
             <label class="form-label">Primary Contact Mobile Number *</label>
@@ -430,15 +934,12 @@ class BusLaneApp {
           </div>
         ` : ''}
       `;
-
       container.appendChild(card);
     });
-
     this.renderInfants();
   }
 
   addInfant() {
-    // Max 1 infant per seated passenger
     if (this.infants.length >= this.selectedSeats.length) {
       alert(`Maximum ${this.selectedSeats.length} lap infant(s) permitted for this booking.`);
       return;
@@ -455,7 +956,6 @@ class BusLaneApp {
   renderInfants() {
     const container = document.getElementById('infants-container');
     if (!container) return;
-
     container.innerHTML = '';
     this.infants.forEach((inf, idx) => {
       const row = document.createElement('div');
@@ -485,13 +985,11 @@ class BusLaneApp {
 
     container.querySelectorAll('.remove-infant-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        const idx = parseInt(e.target.dataset.idx, 10);
-        this.removeInfant(idx);
+        this.removeInfant(parseInt(e.target.dataset.idx, 10));
       });
     });
   }
 
-  // --- Collect & Validate Passenger Details ---
   async saveAndProceedToFare() {
     if (this.selectedSeats.length === 0) {
       alert('Please select at least one seat.');
@@ -523,7 +1021,7 @@ class BusLaneApp {
         return;
       }
       if (isNaN(age) || age < 5 || age > 120) {
-        alert(`Passenger ${i + 1}: Age must be between 5 and 120 (infants under 5 enter as lap infant).`);
+        alert(`Passenger ${i + 1}: Age must be between 5 and 120.`);
         ageInput.focus();
         return;
       }
@@ -538,39 +1036,30 @@ class BusLaneApp {
         return;
       }
       if (i === 0 && !/^[6-9]\d{9}$/.test(phone)) {
-        alert('Please enter a valid 10-digit Indian mobile number starting with 6-9.');
+        alert('Please enter a valid 10-digit Indian mobile number.');
         phoneInput.focus();
         return;
       }
-
       passengers.push({ name, age, gender, phone });
     }
 
-    // Collect infants data
     const infantNames = document.querySelectorAll('.infant-name');
     const infantAges = document.querySelectorAll('.infant-age');
     const infantGenders = document.querySelectorAll('.infant-gender');
     const infantsList = [];
 
     for (let i = 0; i < infantNames.length; i++) {
-      const name = infantNames[i].value.trim();
-      const age = parseInt(infantAges[i].value, 10);
-      const gender = infantGenders[i].value;
-      if (!name) {
-        alert(`Lap Infant ${i + 1}: Please enter infant name.`);
-        return;
-      }
-      if (isNaN(age) || age < 0 || age >= 5) {
-        alert(`Lap Infant ${i + 1}: Age must be between 0 and 4.`);
-        return;
-      }
-      infantsList.push({ name, age, gender });
+      infantsList.push({
+        name: infantNames[i].value.trim(),
+        age: parseInt(infantAges[i].value, 10),
+        gender: infantGenders[i].value
+      });
     }
 
     const boardingPointId = document.getElementById('boarding-select').value;
 
     try {
-      const res = await fetch('/api/passengers', {
+      const res = await this.apiRequest('/api/passengers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -586,38 +1075,25 @@ class BusLaneApp {
         alert(data.error || 'Validation failed');
         return;
       }
-
       this.renderFareSummary(data.fare);
       this.goToStep(3);
     } catch (err) {
-      alert('Network error saving passenger details.');
+      alert('Error saving passenger details.');
     }
   }
 
-  // --- Step 3: Fare Summary Display ---
   renderFareSummary(fare) {
     const count = this.selectedSeats.length;
-    const baseCalc = document.getElementById('invoice-base-calc');
-    const baseSubtotal = document.getElementById('invoice-base-subtotal');
-    const convFee = document.getElementById('invoice-convenience-fee');
-    const taxable = document.getElementById('invoice-taxable-amount');
-    const gst = document.getElementById('invoice-gst-amount');
-    const grandTotal = document.getElementById('invoice-grand-total');
-    const payBtnAmount = document.getElementById('btn-pay-amount');
-    const payDisplayAmount = document.getElementById('pay-display-amount');
-
-    baseCalc.textContent = `₹${fare.baseFarePerSeat} × ${count} seat(s)`;
-    baseSubtotal.textContent = `₹${fare.seatSubtotal}`;
-    convFee.textContent = `₹${fare.convenienceFee}`;
-    taxable.textContent = `₹${fare.taxableAmount}`;
-    gst.textContent = `₹${fare.gstAmount}`;
-    grandTotal.textContent = `₹${fare.grandTotal}`;
-
-    if (payBtnAmount) payBtnAmount.textContent = `₹${fare.grandTotal}`;
-    if (payDisplayAmount) payDisplayAmount.textContent = `₹${fare.grandTotal}`;
+    document.getElementById('invoice-base-calc').textContent = `₹${fare.baseFarePerSeat} × ${count} seat(s)`;
+    document.getElementById('invoice-base-subtotal').textContent = `₹${fare.seatSubtotal}`;
+    document.getElementById('invoice-convenience-fee').textContent = `₹${fare.convenienceFee}`;
+    document.getElementById('invoice-taxable-amount').textContent = `₹${fare.taxableAmount}`;
+    document.getElementById('invoice-gst-amount').textContent = `₹${fare.gstAmount}`;
+    document.getElementById('invoice-grand-total').textContent = `₹${fare.grandTotal}`;
+    document.getElementById('btn-pay-amount').textContent = `₹${fare.grandTotal}`;
+    document.getElementById('pay-display-amount').textContent = `₹${fare.grandTotal}`;
   }
 
-  // --- Step 4: Payment Simulation ---
   async executePayment() {
     const payBtn = document.getElementById('btn-submit-payment');
     const modal = document.getElementById('gateway-modal');
@@ -640,7 +1116,7 @@ class BusLaneApp {
     const selectedMethod = document.querySelector('input[name="pay-method"]:checked')?.value || 'UPI';
 
     try {
-      const res = await fetch('/api/pay', {
+      const res = await this.apiRequest('/api/pay', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -662,11 +1138,10 @@ class BusLaneApp {
         this.clearLocalHold();
         this.goToStep(5);
       } else if (res.status === 409 && data.type === 'LATE_PAYMENT_REFUNDED') {
-        // Late Payment / Seat Stolen Conflict Handled Empathetically!
         conflictAlert.classList.remove('hidden');
         document.getElementById('conflict-alert-title').textContent = '⚠️ Payment Received After Hold Expired';
         document.getElementById('conflict-alert-message').textContent =
-          'Your 10-minute hold expired and the seat was claimed by another customer before payment settled. A full automated refund has been issued to your source account.';
+          'Your hold expired and the seat was claimed by another customer. A full automated refund has been issued to your source account.';
         document.getElementById('conflict-refund-meta').innerHTML = `
           Refund Ref: <strong>${data.refundDetails?.refundTxnId || 'REF-AUTO-9981'}</strong><br>
           Amount: <strong>₹${data.refundDetails?.amount || 0}</strong> (100% Refunded)<br>
@@ -680,11 +1155,10 @@ class BusLaneApp {
       clearInterval(this.gatewayTimerInterval);
       modal.classList.add('hidden');
       payBtn.disabled = false;
-      alert('Network error executing simulated payment.');
+      alert('Payment simulation error.');
     }
   }
 
-  // --- Step 5: Confirmation & Boarding Pass ---
   renderTicketConfirmation(booking) {
     document.getElementById('ticket-booking-ref').textContent = booking.bookingRef;
     document.getElementById('ticket-boarding-point').textContent = booking.boardingPoint.name;
@@ -694,11 +1168,8 @@ class BusLaneApp {
     document.getElementById('ticket-txn-id').textContent = booking.paymentTxnId;
 
     const watermark = document.getElementById('dev-watermark');
-    if (this.isDevMode) {
-      watermark.classList.remove('hidden');
-    } else {
-      watermark.classList.add('hidden');
-    }
+    if (this.isDevMode) watermark.classList.remove('hidden');
+    else watermark.classList.add('hidden');
 
     const roster = document.getElementById('ticket-passenger-roster');
     roster.innerHTML = booking.passengers.map(p => `
@@ -717,8 +1188,7 @@ class BusLaneApp {
       `).join('');
     }
 
-    const cancelFeedback = document.getElementById('cancellation-feedback');
-    cancelFeedback.classList.add('hidden');
+    document.getElementById('cancellation-feedback').classList.add('hidden');
   }
 
   async cancelBooking() {
@@ -726,12 +1196,11 @@ class BusLaneApp {
     if (!confirm('Are you sure you want to cancel this booking and initiate a refund?')) return;
 
     try {
-      const res = await fetch('/api/booking/cancel', {
+      const res = await this.apiRequest('/api/booking/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bookingRef: this.confirmedBooking.bookingRef })
       });
-
       const data = await res.json();
       if (res.ok) {
         const feedback = document.getElementById('cancellation-feedback');
@@ -753,10 +1222,8 @@ class BusLaneApp {
     }
   }
 
-  // --- Step Navigation State Machine ---
   goToStep(step) {
     this.currentStep = step;
-
     document.querySelectorAll('.step-view').forEach(v => v.classList.remove('active'));
     document.querySelectorAll('.step-item').forEach(item => {
       const itemStep = parseInt(item.dataset.step, 10);
@@ -764,46 +1231,37 @@ class BusLaneApp {
       item.classList.toggle('completed', itemStep < step);
     });
 
-    if (step === 1) {
-      document.getElementById('step-seatmap').classList.add('active');
-    } else if (step === 2) {
+    if (step === 1) document.getElementById('step-seatmap').classList.add('active');
+    else if (step === 2) {
       document.getElementById('step-passengers').classList.add('active');
       this.renderPassengerForms();
-    } else if (step === 3) {
-      document.getElementById('step-fare').classList.add('active');
-    } else if (step === 4) {
-      document.getElementById('step-payment').classList.add('active');
-    } else if (step === 5) {
-      document.getElementById('step-confirmation').classList.add('active');
-    }
+    } else if (step === 3) document.getElementById('step-fare').classList.add('active');
+    else if (step === 4) document.getElementById('step-payment').classList.add('active');
+    else if (step === 5) document.getElementById('step-confirmation').classList.add('active');
 
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
-  // --- Live Dev State Inspector Poller (?dev=1) ---
   startDevStatePoller() {
     setInterval(async () => {
       if (!this.isDevMode) return;
       try {
-        const res = await fetch('/api/dev/raw-state');
+        const res = await this.apiRequest('/api/dev/raw-state');
         if (res.ok) {
           const raw = await res.json();
           const pre = document.getElementById('dev-raw-state-pre');
-          if (pre) {
-            pre.textContent = JSON.stringify(raw, null, 2);
-          }
+          if (pre) pre.textContent = JSON.stringify(raw, null, 2);
         }
       } catch (err) {}
     }, 1200);
   }
 
-  // --- Dev Panel Actions ---
   async devExpireHold() {
     if (!this.holdToken) {
       alert('No active hold session on this client.');
       return;
     }
-    const res = await fetch('/api/dev/expire-hold', {
+    const res = await this.apiRequest('/api/dev/expire-hold', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: this.holdToken })
@@ -815,7 +1273,7 @@ class BusLaneApp {
 
   async devSetHoldDuration(durationSec) {
     this.holdDurationSec = parseInt(durationSec, 10);
-    await fetch('/api/dev/set-hold-duration', {
+    await this.apiRequest('/api/dev/set-hold-duration', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ durationSec })
@@ -823,7 +1281,7 @@ class BusLaneApp {
   }
 
   async devSetGatewayMode(mode) {
-    await fetch('/api/dev/set-gateway-mode', {
+    await this.apiRequest('/api/dev/set-gateway-mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode })
@@ -836,18 +1294,18 @@ class BusLaneApp {
       return;
     }
     const target = this.selectedSeats[0];
-    const res = await fetch('/api/dev/steal-seat', {
+    const res = await this.apiRequest('/api/dev/steal-seat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ seatId: target })
     });
     const data = await res.json();
-    alert(`Seat ${target} has been stolen by Customer B (Simulated Booking ${data.bookingRef})!`);
+    alert(`Seat ${target} was stolen by Customer B (Simulated Booking ${data.bookingRef})!`);
     this.fetchFullState();
   }
 
   async devSetPreset(preset) {
-    await fetch('/api/dev/preset', {
+    await this.apiRequest('/api/dev/preset', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ preset })
@@ -859,7 +1317,7 @@ class BusLaneApp {
   async devUpdateBaseFare() {
     const input = document.getElementById('dev-base-fare-input');
     const val = parseInt(input.value, 10);
-    const res = await fetch('/api/dev/set-base-fare', {
+    const res = await this.apiRequest('/api/dev/set-base-fare', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ baseFare: val })
@@ -871,7 +1329,7 @@ class BusLaneApp {
   }
 
   async devSetLatency(latencyMs) {
-    await fetch('/api/dev/set-latency', {
+    await this.apiRequest('/api/dev/set-latency', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ latencyMs })
@@ -880,7 +1338,7 @@ class BusLaneApp {
 
   async devResetAll() {
     if (!confirm('Clear all bookings and holds?')) return;
-    await fetch('/api/dev/reset', { method: 'POST' });
+    await this.apiRequest('/api/dev/reset', { method: 'POST' });
     this.clearLocalHold();
     this.goToStep(1);
     this.fetchFullState();
@@ -896,7 +1354,6 @@ class BusLaneApp {
     });
   }
 
-  // --- Bind DOM Listeners ---
   bindEvents() {
     document.getElementById('dev-toggle-btn')?.addEventListener('click', () => this.toggleDevMode());
     document.getElementById('dev-minimize-btn')?.addEventListener('click', () => {
@@ -919,11 +1376,9 @@ class BusLaneApp {
 
     document.getElementById('btn-add-infant')?.addEventListener('click', () => this.addInfant());
 
-    // Dev Panel controls
     document.querySelectorAll('.dev-jump-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        const target = parseInt(e.target.dataset.target, 10);
-        this.goToStep(target);
+        this.goToStep(parseInt(e.target.dataset.target, 10));
       });
     });
 
@@ -943,7 +1398,6 @@ class BusLaneApp {
   }
 }
 
-// Bootstrap Application on DOM Ready
 document.addEventListener('DOMContentLoaded', () => {
   window.app = new BusLaneApp();
 });
